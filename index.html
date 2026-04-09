@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoVideoEdit</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+
+    h1 { font-size: 1.5rem; font-weight: 600; color: #fff; margin-bottom: 0.3rem; }
+    .subtitle { color: #666; font-size: 0.85rem; margin-bottom: 2rem; }
+
+    /* ── Section labels ──────────────────────────────── */
+    .section-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #555;
+      margin-bottom: 0.6rem;
+    }
+
+    /* ── Rules textarea ──────────────────────────────── */
+    .rules-block {
+      max-width: 720px;
+      margin-bottom: 2rem;
+    }
+
+    textarea {
+      width: 100%;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      color: #ccc;
+      font-family: inherit;
+      font-size: 0.85rem;
+      line-height: 1.55;
+      padding: 0.75rem 1rem;
+      resize: vertical;
+      transition: border-color 0.15s;
+    }
+    textarea:focus { outline: none; border-color: #4a9eff55; }
+    textarea::placeholder { color: #444; }
+
+    /* ── Video upload rows ───────────────────────────── */
+    .upload-grid { max-width: 720px; display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.5rem; }
+
+    .video-card {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .video-card-top {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem 1rem;
+    }
+
+    .slot-label { font-size: 0.8rem; color: #555; white-space: nowrap; }
+
+    .file-input-wrapper { position: relative; overflow: hidden; }
+    .file-input-wrapper input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%;
+    }
+    .file-btn {
+      display: block;
+      padding: 0.42rem 0.85rem;
+      background: #222;
+      border: 1px dashed #3a3a3a;
+      border-radius: 6px;
+      font-size: 0.82rem;
+      color: #999;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 360px;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .file-input-wrapper:hover .file-btn { border-color: #555; color: #ddd; }
+    .file-btn.has-file { border-style: solid; border-color: #4a9eff55; color: #4a9eff; }
+
+    select {
+      background: #222;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #ddd;
+      font-size: 0.82rem;
+      padding: 0.42rem 0.6rem;
+      cursor: pointer;
+      appearance: none;
+      -webkit-appearance: none;
+      min-width: 72px;
+      text-align: center;
+    }
+    select:focus { outline: none; border-color: #4a9eff; }
+
+    .summary-area {
+      border-top: 1px solid #222;
+      padding: 0 1rem 0.75rem;
+    }
+    .summary-area textarea {
+      border-radius: 6px;
+      font-size: 0.82rem;
+      min-height: 58px;
+      border-color: #222;
+      background: #141414;
+    }
+    .summary-label {
+      font-size: 0.7rem;
+      color: #444;
+      margin: 0.6rem 0 0.35rem;
+    }
+
+    /* ── Submit ──────────────────────────────────────── */
+    .submit-btn {
+      padding: 0.65rem 2rem;
+      background: #4a9eff;
+      color: #000;
+      font-weight: 700;
+      font-size: 0.9rem;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .submit-btn:hover { background: #6ab4ff; }
+    .submit-btn:disabled { background: #252525; color: #555; cursor: not-allowed; }
+
+    /* ── Status section ──────────────────────────────── */
+    #status-section { max-width: 720px; }
+
+    .status-list { display: flex; flex-direction: column; gap: 0.6rem; }
+
+    .status-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      background: #1a1a1a;
+      border: 1px solid #252525;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+    }
+
+    .seq-badge {
+      background: #252525;
+      color: #666;
+      border-radius: 4px;
+      padding: 0.15rem 0.5rem;
+      font-size: 0.72rem;
+      font-weight: 700;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .status-text { flex: 1; }
+    .status-name { font-size: 0.88rem; color: #ccc; word-break: break-all; }
+    .status-detail { font-size: 0.78rem; color: #555; margin-top: 0.2rem; }
+    .error-msg {
+      margin-top: 0.35rem;
+      font-size: 0.76rem;
+      color: #ff6b6b;
+      font-family: monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .badge {
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 0.2rem 0.6rem;
+      border-radius: 20px;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .badge-pending    { background: #222; color: #555; }
+    .badge-transcribing { background: #1a1a2e; color: #7b9fff; }
+    .badge-analyzing  { background: #1a2a1a; color: #6fcf97; }
+    .badge-ai_editing { background: #2a1a2e; color: #c77dff; }
+    .badge-rendering  { background: #2a1a00; color: #f5a623; }
+    .badge-done       { background: #0d2b1a; color: #3ddc84; }
+    .badge-error      { background: #2b0d0d; color: #ff6b6b; }
+
+    .spinner {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border: 2px solid #ffffff22;
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Player section ──────────────────────────────── */
+    #player-section { max-width: 860px; }
+
+    .player-meta { font-size: 0.85rem; color: #666; margin-bottom: 0.65rem; }
+    .player-meta strong { color: #bbb; }
+
+    video { width: 100%; border-radius: 10px; background: #000; display: block; }
+
+    .playlist-bar {
+      display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap;
+    }
+    .pl-item {
+      padding: 0.28rem 0.7rem;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      color: #555;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .pl-item.active  { background: #4a9eff22; border-color: #4a9eff; color: #4a9eff; }
+    .pl-item.played  { color: #3ddc8455; border-color: #3ddc8422; }
+
+    .reset-btn {
+      margin-top: 1.5rem;
+      padding: 0.45rem 1.1rem;
+      background: transparent;
+      color: #555;
+      border: 1px solid #2a2a2a;
+      border-radius: 6px;
+      font-size: 0.82rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .reset-btn:hover { border-color: #555; color: #aaa; }
+
+    section { margin-bottom: 2.5rem; }
+  </style>
+</head>
+<body>
+
+  <!-- ── Upload ──────────────────────────────────────── -->
+  <section id="upload-section">
+    <h1>AutoVideoEdit</h1>
+    <p class="subtitle">Upload videos → Whisper transcribes → Claude edits → plays in sequence</p>
+
+    <!-- Global rules -->
+    <div class="rules-block">
+      <div class="section-label">Editing Rules (applies to all videos)</div>
+      <textarea id="global-rules" rows="5" oninput="saveForm()" placeholder="e.g.
+- Cut filler words: uh, um, okay so, you know
+- Cut pauses longer than 1 second unless after a key point
+- Cut any gibberish or incoherent AI-generated speech
+- Keep all complete sentences even with trailing silence
+- Speed up at 2× any slow exposition that isn't dialogue"></textarea>
+    </div>
+
+    <!-- Video slots -->
+    <div class="section-label">Videos</div>
+    <div class="upload-grid" id="upload-grid"></div>
+
+    <button class="submit-btn" id="submit-btn" onclick="submitVideos()">
+      Process &amp; Edit Videos
+    </button>
+  </section>
+
+  <!-- ── Status ───────────────────────────────────────── -->
+  <section id="status-section" hidden>
+    <div class="section-label">Processing</div>
+    <div class="status-list" id="status-list"></div>
+  </section>
+
+  <!-- ── Player ───────────────────────────────────────── -->
+  <section id="player-section" hidden>
+    <div class="section-label">Playback</div>
+    <div id="time-reduction-bar" style="display:none;margin-bottom:1rem;background:#1a1a1a;border:1px solid #252525;border-radius:8px;padding:0.75rem 1rem;font-size:0.85rem;line-height:1.8"></div>
+    <div class="player-meta" id="player-meta">Ready.</div>
+    <video id="main-video" controls></video>
+    <div class="playlist-bar" id="playlist-bar"></div>
+    <button class="reset-btn" onclick="resetApp()">Upload New Videos</button>
+  </section>
+
+  <script>
+    const NUM_SLOTS = 5;
+
+    // ── localStorage persistence ───────────────────────
+    const LS_KEY = "autovideoedit_form";
+
+    function saveForm() {
+      const data = { rules: document.getElementById("global-rules").value };
+      for (let i = 0; i < NUM_SLOTS; i++) {
+        const seq = document.getElementById(`seq-${i}`);
+        const dialogue = document.getElementById(`dialogue-${i}`);
+        const summary = document.getElementById(`summary-${i}`);
+        if (seq) data[`seq_${i}`] = seq.value;
+        if (dialogue) data[`dialogue_${i}`] = dialogue.value;
+        if (summary) data[`summary_${i}`] = summary.value;
+      }
+      localStorage.setItem(LS_KEY, JSON.stringify(data));
+    }
+
+    function restoreForm() {
+      try {
+        const data = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+        const rules = document.getElementById("global-rules");
+        if (rules && data.rules != null) rules.value = data.rules;
+        for (let i = 0; i < NUM_SLOTS; i++) {
+          const seq = document.getElementById(`seq-${i}`);
+          const dialogue = document.getElementById(`dialogue-${i}`);
+          const summary = document.getElementById(`summary-${i}`);
+          if (seq && data[`seq_${i}`]) seq.value = data[`seq_${i}`];
+          if (dialogue && data[`dialogue_${i}`] != null) dialogue.value = data[`dialogue_${i}`];
+          if (summary && data[`summary_${i}`] != null) summary.value = data[`summary_${i}`];
+        }
+      } catch {}
+    }
+
+    // ── Build upload rows ──────────────────────────────
+    function buildUploadRows() {
+      const grid = document.getElementById("upload-grid");
+      grid.innerHTML = "";
+      for (let i = 0; i < NUM_SLOTS; i++) {
+        const card = document.createElement("div");
+        card.className = "video-card";
+        card.innerHTML = `
+          <div class="video-card-top">
+            <span class="slot-label">Video ${i + 1}</span>
+            <div class="file-input-wrapper">
+              <span class="file-btn" id="label-${i}">Choose file…</span>
+              <input type="file" id="file-${i}" accept="video/*" onchange="onFileChange(${i})">
+            </div>
+            <select id="seq-${i}" onchange="saveForm()">
+              <option value="">Seq</option>
+              ${[1,2,3,4,5].map(n => `<option value="${n}">${n}</option>`).join("")}
+            </select>
+          </div>
+          <div class="summary-area">
+            <div class="summary-label">Intended Dialogue — the exact words that should be in this video (AI garbage around it will be cut)</div>
+            <textarea id="dialogue-${i}" rows="2" oninput="saveForm()"
+              placeholder="e.g. Welcome to the product demo. Today we'll walk through the dashboard filters and the export flow."></textarea>
+            <div class="summary-label" style="margin-top:0.5rem">Shot context (optional)</div>
+            <textarea id="summary-${i}" rows="1" oninput="saveForm()"
+              placeholder="e.g. Product walkthrough — dashboard section"></textarea>
+          </div>
+        `;
+        grid.appendChild(card);
+      }
+      restoreForm();
+    }
+
+    function onFileChange(i) {
+      const input = document.getElementById(`file-${i}`);
+      const label = document.getElementById(`label-${i}`);
+      if (input.files[0]) {
+        label.textContent = input.files[0].name;
+        label.classList.add("has-file");
+        // Auto-assign the next free sequence number
+        const seq = document.getElementById(`seq-${i}`);
+        if (!seq.value) {
+          const used = new Set(
+            [...document.querySelectorAll("select[id^='seq-']")]
+              .map(s => s.value).filter(Boolean).map(Number)
+          );
+          for (let n = 1; n <= NUM_SLOTS; n++) {
+            if (!used.has(n)) { seq.value = String(n); saveForm(); break; }
+          }
+        }
+      } else {
+        label.textContent = "Choose file…";
+        label.classList.remove("has-file");
+      }
+    }
+
+    // ── Submit ─────────────────────────────────────────
+    async function submitVideos() {
+      const rules = document.getElementById("global-rules").value.trim();
+      const formData = new FormData();
+      formData.append("rules", rules);
+
+      const seqs = [];
+      for (let i = 0; i < NUM_SLOTS; i++) {
+        const fileInput = document.getElementById(`file-${i}`);
+        const seqInput  = document.getElementById(`seq-${i}`);
+        const dialogue  = document.getElementById(`dialogue-${i}`).value.trim();
+        const summary   = document.getElementById(`summary-${i}`).value.trim();
+        if (!fileInput.files[0]) continue;
+        if (!seqInput.value) {
+          alert(`Please assign a sequence number to Video ${i + 1}.`);
+          return;
+        }
+        formData.append("files", fileInput.files[0]);
+        formData.append("sequences", seqInput.value);
+        formData.append("intended_dialogues", dialogue);
+        formData.append("shot_summaries", summary);
+        seqs.push(Number(seqInput.value));
+      }
+
+      if (seqs.length === 0) { alert("Select at least one video."); return; }
+      if (new Set(seqs).size !== seqs.length) {
+        alert("Duplicate sequence numbers."); return;
+      }
+
+      document.getElementById("submit-btn").disabled = true;
+
+      let resp;
+      try {
+        resp = await fetch("http://127.0.0.1:8000/upload", { method: "POST", body: formData });
+      } catch (e) {
+        alert("Network error: " + e.message);
+        document.getElementById("submit-btn").disabled = false;
+        return;
+      }
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+        alert("Upload failed: " + (err.detail || resp.statusText));
+        document.getElementById("submit-btn").disabled = false;
+        return;
+      }
+
+      const { job_ids } = await resp.json();
+      document.getElementById("upload-section").hidden = true;
+      document.getElementById("status-section").hidden = false;
+      startPolling(job_ids);
+    }
+
+    // ── Status polling ─────────────────────────────────
+    let pollInterval = null;
+
+    function startPolling(job_ids) {
+      pollStatus(job_ids);
+      pollInterval = setInterval(() => pollStatus(job_ids), 2000);
+    }
+
+    async function pollStatus(job_ids) {
+      let jobs;
+      try {
+        const idsParam = job_ids ? `?ids=${job_ids.join(",")}` : "";
+        jobs = await fetch(`http://127.0.0.1:8000/status${idsParam}`).then(r => r.json());
+      } catch { return; }
+
+      renderStatus(jobs);
+
+      const statuses = Object.values(jobs).map(j => j.status);
+      if (statuses.length && statuses.every(s => s === "done" || s === "error")) {
+        clearInterval(pollInterval);
+        if (statuses.some(s => s === "done")) {
+          setTimeout(() => initPlayer(jobs), 600);
+        }
+      }
+    }
+
+    const BADGE_LABELS = {
+      pending:      "Pending",
+      transcribing: "Transcribing",
+      analyzing:    "Analyzing audio",
+      ai_editing:   "Claude editing",
+      rendering:    "Rendering",
+      done:         "Done",
+      error:        "Error",
+    };
+    const SPINNING = ["transcribing", "analyzing", "ai_editing", "rendering"];
+
+    function renderStatus(jobs) {
+      const list = document.getElementById("status-list");
+      const sorted = Object.entries(jobs).sort((a, b) => a[1].sequence - b[1].sequence);
+      list.innerHTML = sorted.map(([, j]) => {
+        const spinning = SPINNING.includes(j.status);
+        const label    = BADGE_LABELS[j.status] || j.status;
+        const detail   = j.status_detail ? `<div class="status-detail">${escHtml(j.status_detail)}</div>` : "";
+        const errHtml  = j.error ? `<div class="error-msg">${escHtml(j.error)}</div>` : "";
+        return `
+          <div class="status-row">
+            <span class="seq-badge">#${j.sequence}</span>
+            <div class="status-text">
+              <div class="status-name">${escHtml(j.original_name)}</div>
+              ${detail}${errHtml}
+            </div>
+            <span class="badge badge-${j.status}">
+              ${spinning ? '<span class="spinner"></span>' : ""}${label}
+            </span>
+          </div>`;
+      }).join("");
+    }
+
+    // ── Player ─────────────────────────────────────────
+    let playlist = [];
+    let currentIdx = 0;
+
+    function initPlayer(jobs) {
+      playlist = Object.entries(jobs)
+        .filter(([, j]) => j.status === "done")
+        .sort((a, b) => a[1].sequence - b[1].sequence)
+        .map(([jobId, j]) => ({ jobId, sequence: j.sequence, name: j.original_name }));
+
+      document.getElementById("status-section").hidden = true;
+      document.getElementById("player-section").hidden = false;
+
+      renderTimeReduction(jobs);
+      buildPlaylistBar();
+      currentIdx = 0;
+      playAt(0);
+    }
+
+    function buildPlaylistBar() {
+      document.getElementById("playlist-bar").innerHTML =
+        playlist.map((item, idx) =>
+          `<div class="pl-item" id="pl-${idx}" onclick="jumpTo(${idx})">
+            ${item.sequence}. ${escHtml(shortName(item.name))}
+          </div>`
+        ).join("");
+    }
+
+    function playAt(idx) {
+      if (idx >= playlist.length) {
+        document.getElementById("player-meta").innerHTML =
+          `<strong>All done</strong> — ${playlist.length} video${playlist.length > 1 ? "s" : ""} played.`;
+        updateBar(-1);
+        return;
+      }
+      currentIdx = idx;
+      const { jobId, name, sequence } = playlist[idx];
+      document.getElementById("player-meta").innerHTML =
+        `Playing <strong>${idx + 1} / ${playlist.length}</strong>: ${escHtml(name)}`;
+
+      const video = document.getElementById("main-video");
+      video.src = `http://127.0.0.1:8000/videos/${jobId}`;
+      video.load();
+      video.play().catch(() => {});
+      updateBar(idx);
+    }
+
+    function jumpTo(idx) {
+      document.getElementById("main-video").pause();
+      playAt(idx);
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("main-video").addEventListener("ended", () => playAt(currentIdx + 1));
+      buildUploadRows();
+    });
+
+    function updateBar(activeIdx) {
+      playlist.forEach((_, idx) => {
+        const el = document.getElementById(`pl-${idx}`);
+        if (!el) return;
+        el.className = "pl-item" +
+          (idx === activeIdx ? " active" : idx < activeIdx ? " played" : "");
+      });
+    }
+
+    // ── Reset ──────────────────────────────────────────
+    function resetApp() {
+      clearInterval(pollInterval);
+      playlist = []; currentIdx = 0;
+      const v = document.getElementById("main-video");
+      v.pause(); v.src = "";
+      document.getElementById("status-section").hidden = true;
+      document.getElementById("player-section").hidden = true;
+      document.getElementById("upload-section").hidden = false;
+      document.getElementById("submit-btn").disabled = false;
+      buildUploadRows();
+    }
+
+    // ── Time reduction summary ─────────────────────────
+    function fmt(sec) {
+      if (sec == null) return "?";
+      const m = Math.floor(sec / 60);
+      const s = (sec % 60).toFixed(1);
+      return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    }
+
+    function renderTimeReduction(jobs) {
+      const bar = document.getElementById("time-reduction-bar");
+      const entries = Object.values(jobs)
+        .filter(j => j.status === "done" && j.original_duration != null && j.kept_duration != null)
+        .sort((a, b) => a.sequence - b.sequence);
+
+      if (!entries.length) return;
+
+      let totalOrig = 0, totalKept = 0;
+      const rows = entries.map(j => {
+        totalOrig += j.original_duration;
+        totalKept += j.kept_duration;
+        const pct = Math.round((1 - j.kept_duration / j.original_duration) * 100);
+        return `<div style="display:flex;gap:1rem;align-items:baseline">
+          <span style="color:#555;min-width:20px">#${j.sequence}</span>
+          <span style="color:#888;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(j.original_name)}</span>
+          <span style="color:#ccc;white-space:nowrap">${fmt(j.original_duration)} → ${fmt(j.kept_duration)}</span>
+          <span style="color:#3ddc84;font-weight:700;white-space:nowrap;min-width:44px;text-align:right">−${pct}%</span>
+        </div>`;
+      }).join("");
+
+      const totalPct = Math.round((1 - totalKept / totalOrig) * 100);
+      const totalRow = `<div style="display:flex;gap:1rem;align-items:baseline;border-top:1px solid #2a2a2a;margin-top:0.5rem;padding-top:0.5rem">
+        <span style="color:#555;min-width:20px"></span>
+        <span style="color:#aaa;flex:1;font-weight:600">Total</span>
+        <span style="color:#fff;font-weight:600;white-space:nowrap">${fmt(totalOrig)} → ${fmt(totalKept)}</span>
+        <span style="color:#3ddc84;font-weight:800;white-space:nowrap;min-width:44px;text-align:right">−${totalPct}%</span>
+      </div>`;
+
+      bar.innerHTML = rows + (entries.length > 1 ? totalRow : "");
+      bar.style.display = "block";
+    }
+
+    // ── Helpers ────────────────────────────────────────
+    function escHtml(s) {
+      return String(s ?? "")
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+        .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+    function shortName(n) { return n.length > 24 ? n.slice(0,22)+"…" : n; }
+  </script>
+</body>
+</html>
