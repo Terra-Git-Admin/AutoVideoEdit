@@ -5,8 +5,11 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List
+
+JOB_TTL_SECONDS = 2 * 60 * 60  # auto-purge jobs older than 2 hours
 
 # Whisper/Numba are not thread-safe — serialize all transcription calls
 _whisper_lock = threading.Lock()
@@ -114,12 +117,7 @@ async def upload_videos(
     if len(dialogues) != n or len(summaries) != n:
         raise HTTPException(400, "intended_dialogues / shot_summaries count must match file count when provided")
 
-    # Purge finished jobs from previous batches to keep memory clean
-    stale = [jid for jid, j in jobs.items() if j["status"] in ("done", "error")]
-    for jid in stale:
-        del jobs[jid]
-    if stale:
-        log.info(f"Purged {len(stale)} completed job(s) from memory")
+    # Do NOT purge finished jobs here — client may still be polling them
 
     log.info(f"=== NEW UPLOAD BATCH === {len(files)} file(s), mode={mode}, rules={rules.strip()[:100] or '(default)'}")
 
@@ -155,6 +153,7 @@ async def upload_videos(
             "transcript": None,
             "mode": mode,
             "error": None,
+            "created_at": time.time(),
         }
         background_tasks.add_task(
             process_video, job_id, str(upload_path), str(output_path),
@@ -495,6 +494,14 @@ def clear_jobs():
 @app.get("/status")
 def get_status(ids: str = ""):
     """Return status for specific job IDs (comma-separated ?ids=id1,id2) or all jobs if omitted."""
+    # Passively purge jobs older than TTL
+    now = time.time()
+    stale = [jid for jid, j in jobs.items() if now - j.get("created_at", now) > JOB_TTL_SECONDS]
+    for jid in stale:
+        del jobs[jid]
+    if stale:
+        log.info(f"[/status] Auto-purged {len(stale)} job(s) older than {JOB_TTL_SECONDS//3600}h")
+
     requested = set(ids.split(",")) if ids else None
     filtered = {
         job_id: job for job_id, job in jobs.items()
