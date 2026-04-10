@@ -4,3 +4,7 @@ python-multipart>=0.0.9
 aiofiles>=23.2.1
 openai-whisper>=20240930
 google-generativeai>=0.8.0
+python-dotenv>=1.0.0
+redis>=5.0.0
+google-cloud-firestore>=2.16.0
+google-cloud-storage>=2.16.0
