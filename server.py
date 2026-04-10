@@ -486,6 +486,10 @@ def _render_stage(
         log.info(f"[{tag}] STEP 2/3 — Gemini AI editing")
         set_status(job_id, "ai_editing", "Gemini is reviewing dialogue and editing…")
         keep_ranges = claude_edit(transcript, duration, intended_dialogue, shot_summary, rules)
+        sorted_kr = sorted(keep_ranges, key=lambda r: r["start"])
+        in_point  = sorted_kr[0]["start"]  if sorted_kr else 0.0
+        out_point = sorted_kr[-1]["end"]   if sorted_kr else duration
+        job_update(job_id, in_point=in_point, out_point=out_point)
         estimated_kept = sum(r["end"] - r["start"] for r in keep_ranges)
         log.info(f"[{tag}] Gemini decision — {len(keep_ranges)} keep range(s): {keep_ranges}")
         pct = f"{100*estimated_kept/duration:.1f}%" if duration > 0 else "N/A"
@@ -790,6 +794,8 @@ def get_status(ids: str = "", session_id: str = ""):
             "status_detail": job.get("status_detail", ""),
             "original_duration": job.get("original_duration"),
             "kept_duration": job.get("kept_duration"),
+            "in_point": job.get("in_point"),
+            "out_point": job.get("out_point"),
             "transcript": job.get("transcript"),
             "error": job["error"],
         }
@@ -839,7 +845,10 @@ def _render_job(job_id: str, input_path: str, output_path: str, keep_ranges: lis
         if not Path(output_path).exists():
             raise RuntimeError("Output file missing after render")
         actual = get_video_duration(output_path)
-        job_update(job_id, kept_duration=actual)
+        sorted_kr = sorted(keep_ranges, key=lambda r: r["start"])
+        in_point  = sorted_kr[0]["start"]  if sorted_kr else 0.0
+        out_point = sorted_kr[-1]["end"]   if sorted_kr else actual
+        job_update(job_id, kept_duration=actual, in_point=in_point, out_point=out_point)
         log.info(f"[{job_id[:8]}] Manual render done — actual duration {actual:.2f}s")
         set_status(job_id, "done", "")
     except Exception as e:
