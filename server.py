@@ -26,7 +26,9 @@ DONE_TTL_SECONDS = 30 * 60        # done/error jobs linger 30 min for polling & 
 # Each Whisper worker thread loads its own model instance via thread-local
 # storage (see get_whisper_model). 4 workers = 4 independent model copies,
 # ~580 MB total for the base model — safe to run in parallel.
-WHISPER_WORKERS = 4
+# On CPU (local dev), set WHISPER_WORKERS=1 in .env to avoid Numba threading crashes.
+# On GPU (Linux prod), default of 4 is safe — CUDA doesn't use Numba's workqueue.
+WHISPER_WORKERS = int(os.environ.get("WHISPER_WORKERS", "4"))
 _whisper_executor = ThreadPoolExecutor(max_workers=WHISPER_WORKERS)
 
 # Render executor: handles Gemini + ffmpeg only (no Whisper, never blocks).
@@ -166,6 +168,8 @@ def job_update(job_id: str, **fields):
     if data is None:
         log.error(f"job_update: job {job_id[:8]} not found in Redis (expired?), skipping update: {fields}")
         return
+    if fields.get("status") == "error" and data.get("status") != "error":
+        data["failed_at"] = data.get("status", "unknown")
     data.update(fields)
     job_set(job_id, data)
 
@@ -776,7 +780,7 @@ Output JSON with the time ranges to KEEP."""
     log.info(f"[Gemini] User prompt:\n{user_prompt}")
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
-        model_name="gemini-2.5-pro",
+        model_name="gemini-2.5-flash",
         system_instruction=firestore_client.get_system_prompt()
     )
     log.info(f"[Gemini] System instruction:\n{firestore_client.get_system_prompt()}")
@@ -871,6 +875,7 @@ def get_status(ids: str = "", session_id: str = ""):
             "out_point": job.get("out_point"),
             "transcript": job.get("transcript"),
             "error": job["error"],
+            "failed_at": job.get("failed_at"),
         }
         for job_id, job in filtered.items()
     }
