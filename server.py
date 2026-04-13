@@ -309,6 +309,7 @@ async def upload_videos(
     mode: str = Form("auto"),
     session_id: str = Form(...),  # caller generates one UUID per episode; same for all batches
     has_more: bool = Form(True),  # False on the last batch — tells backend all jobs are now known
+    vo_ranges: str = Form(None),  # JSON: [{"job_id": "...", "end": 7.3}] — VO shots only
 ):
     if len(files) > 5:
         raise HTTPException(400, "Max 5 files allowed")
@@ -329,6 +330,21 @@ async def upload_videos(
 
     if _redis is None:
         raise HTTPException(503, "Redis unavailable — cannot process uploads")
+
+    # ── Parse VO ranges ───────────────────────────────────────────────────────
+    vo_map: dict[str, float] = {}  # job_id → vo_end (seconds)
+    if vo_ranges:
+        try:
+            parsed = json.loads(vo_ranges)
+            if not isinstance(parsed, list):
+                raise ValueError("vo_ranges must be a JSON array")
+            for entry in parsed:
+                if not isinstance(entry, dict) or "job_id" not in entry or "end" not in entry:
+                    raise ValueError(f"each vo_ranges entry must have job_id and end: {entry}")
+                vo_map[entry["job_id"]] = float(entry["end"])
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid vo_ranges: {e}")
+        log.info(f"[upload] VO shots in this batch: {list(vo_map.keys())}")
 
     # ── Pre-upload snapshot ───────────────────────────────────────────────────
     existing = jobs_get_many(job_ids)
@@ -377,6 +393,7 @@ async def upload_videos(
             "kept_duration": None,
             "transcript": None,
             "mode": mode,
+            "vo_end": vo_map.get(job_id),  # None for regular shots, float for VO shots
             "error": None,
             "created_at": time.time(),
         })
@@ -435,6 +452,37 @@ def _whisper_stage(
         job_update(job_id, status="error", error=msg)
         return
 
+    # ── VO shortcut: skip Whisper + Gemini entirely ──────────────────────────
+    job_data = job_get(job_id)
+    vo_end = job_data.get("vo_end") if job_data else None
+    if vo_end is not None:
+        try:
+            video_duration = get_video_duration(input_path)
+            job_update(job_id, original_duration=video_duration)
+            keep_end = min(video_duration, vo_end + 0.2)
+            keep_ranges = [{"start": 0.0, "end": keep_end}]
+            will_trim = (vo_end + 0.2) < video_duration
+            log.info(f"[{tag}] ╔══════════════════════════════════════════════╗")
+            log.info(f"[{tag}] ║              VO SHOT DETECTED                ║")
+            log.info(f"[{tag}] ╠══════════════════════════════════════════════╣")
+            log.info(f"[{tag}] ║ File          : {Path(input_path).name}")
+            log.info(f"[{tag}] ║ Video duration: {video_duration:.3f}s")
+            log.info(f"[{tag}] ║ VO end        : {vo_end:.3f}s")
+            log.info(f"[{tag}] ║ Buffer        : +0.200s")
+            log.info(f"[{tag}] ║ Keep range    : 0.000s–{keep_end:.3f}s")
+            if will_trim:
+                trimmed_amt = video_duration - keep_end
+                log.info(f"[{tag}] ║ Action        : TRIM — removing last {trimmed_amt:.3f}s")
+            else:
+                log.info(f"[{tag}] ║ Action        : KEEP FULL — VO >= video, no trim needed")
+            log.info(f"[{tag}] ╚══════════════════════════════════════════════╝")
+            set_status(job_id, "rendering", "VO shot — trimming to match voiceover duration…")
+            _render_executor.submit(_render_job, job_id, input_path, output_path, keep_ranges)
+        except Exception as e:
+            log.exception(f"[{tag}] VO SHORTCUT FAILED: {e}")
+            job_update(job_id, status="error", error=str(e))
+        return
+
     try:
         log.info(f"[{tag}] STEP 1/3 — Whisper transcription")
         set_status(job_id, "transcribing", "Transcribing audio with Whisper…")
@@ -485,7 +533,11 @@ def _render_stage(
         # ── Step 2: Gemini decides what to keep ───────────────────────────
         log.info(f"[{tag}] STEP 2/3 — Gemini AI editing")
         set_status(job_id, "ai_editing", "Gemini is reviewing dialogue and editing…")
-        keep_ranges = claude_edit(transcript, duration, intended_dialogue, shot_summary, rules)
+        keep_ranges = gemini_edit(transcript, duration, intended_dialogue, shot_summary, rules)
+        if not keep_ranges:
+            log.error(f"[{tag}] Gemini returned no keep ranges — nothing to render")
+            job_update(job_id, status="error", error="Gemini returned no keep ranges for this video")
+            return
         sorted_kr = sorted(keep_ranges, key=lambda r: r["start"])
         in_point  = sorted_kr[0]["start"]  if sorted_kr else 0.0
         out_point = sorted_kr[-1]["end"]   if sorted_kr else duration
@@ -587,45 +639,53 @@ def render_with_ffmpeg(keep_ranges: list, input_path: str, output_path: str, tag
     if not ffmpeg:
         raise RuntimeError("ffmpeg not found in PATH")
 
-    tmp = Path(output_path).parent
-    seg_paths = []
+    if not keep_ranges:
+        raise RuntimeError("render_with_ffmpeg called with empty keep_ranges")
 
-    for i, r in enumerate(keep_ranges):
-        seg = str(tmp / f"{Path(output_path).stem}_seg{i}.mp4")
-        duration = r["end"] - r["start"]
-        cmd = [
-            ffmpeg, "-y",
-            "-ss", f"{r['start']:.3f}",
-            "-i", input_path,
-            "-t", f"{duration:.3f}",
-            "-c:v", "libx264", "-c:a", "aac",
-            "-movflags", "+faststart",
-            seg,
-        ]
-        log.info(f"[{tag}] ffmpeg segment {i}: {r['start']:.3f}s–{r['end']:.3f}s → {seg}")
+    tmp = Path(output_path).parent
+    seg_paths: list[str] = []
+    concat_file: str | None = None
+
+    try:
+        for i, r in enumerate(keep_ranges):
+            seg = str(tmp / f"{Path(output_path).stem}_seg{i}.mp4")
+            duration = r["end"] - r["start"]
+            cmd = [
+                ffmpeg, "-y",
+                "-ss", f"{r['start']:.3f}",
+                "-i", input_path,
+                "-t", f"{duration:.3f}",
+                "-c:v", "libx264", "-c:a", "aac",
+            ]
+            if duration < 2.0:
+                cmd += ["-x264-params", "keyint=1:min-keyint=1", "-g", "1", "-bf", "0"]
+            cmd += ["-movflags", "+faststart", seg]
+            log.info(f"[{tag}] ffmpeg segment {i}: {r['start']:.3f}s–{r['end']:.3f}s → {seg}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg segment {i} failed: {result.stderr[-300:]}")
+            seg_paths.append(seg)
+
+        if len(seg_paths) == 1:
+            shutil.move(seg_paths.pop(), output_path)
+            return
+
+        concat_file = str(tmp / f"{Path(output_path).stem}_concat.txt")
+        with open(concat_file, "w") as f:
+            for seg in seg_paths:
+                f.write(f"file '{seg}'\n")
+
+        cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", output_path]
+        log.info(f"[{tag}] ffmpeg concat: {len(seg_paths)} segments → {output_path}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg segment {i} failed: {result.stderr[-300:]}")
-        seg_paths.append(seg)
+            raise RuntimeError(f"ffmpeg concat failed: {result.stderr[-300:]}")
 
-    if len(seg_paths) == 1:
-        shutil.move(seg_paths[0], output_path)
-        return
-
-    concat_file = str(tmp / f"{Path(output_path).stem}_concat.txt")
-    with open(concat_file, "w") as f:
+    finally:
         for seg in seg_paths:
-            f.write(f"file '{seg}'\n")
-
-    cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", output_path]
-    log.info(f"[{tag}] ffmpeg concat: {len(seg_paths)} segments → {output_path}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg concat failed: {result.stderr[-300:]}")
-
-    for seg in seg_paths:
-        Path(seg).unlink(missing_ok=True)
-    Path(concat_file).unlink(missing_ok=True)
+            Path(seg).unlink(missing_ok=True)
+        if concat_file:
+            Path(concat_file).unlink(missing_ok=True)
 
 
 # ── Whisper ───────────────────────────────────────────────────────────────────
@@ -659,7 +719,7 @@ def transcribe(input_path: str) -> list:
 # and cached for PROMPT_CACHE_TTL seconds. Update in Firestore → propagates automatically.
 
 
-def claude_edit(
+def gemini_edit(
     transcript: list,
     duration: float,
     intended_dialogue: str,
@@ -741,12 +801,25 @@ Output JSON with the time ranges to KEEP."""
     if not isinstance(keep, list):
         raise RuntimeError(f"Gemini JSON missing 'keep' list — got: {type(keep)}")
 
-    keep = [
-        {"start": max(0.0, float(r["start"])), "end": min(duration, float(r["end"]))}
-        for r in keep
-        if isinstance(r, dict) and "start" in r and "end" in r and float(r["end"]) > float(r["start"])
-    ]
-    return keep
+    MIN_SEGMENT = 0.5  # seconds — avoid ffmpeg encoding issues on very short segments
+
+    validated = []
+    for r in keep:
+        if not isinstance(r, dict) or "start" not in r or "end" not in r:
+            continue
+        start = max(0.0, float(r["start"]))
+        end   = min(duration, float(r["end"]))
+        if end <= start:
+            continue
+        if end - start < MIN_SEGMENT:
+            original_dur = end - start
+            end = min(duration, start + MIN_SEGMENT)
+            if end - start < MIN_SEGMENT:
+                start = max(0.0, end - MIN_SEGMENT)
+            log.info(f"[Gemini] Extended short segment {original_dur:.3f}s → {end - start:.3f}s "
+                     f"({start:.3f}s–{end:.3f}s)")
+        validated.append({"start": start, "end": end})
+    return validated
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -840,8 +913,9 @@ def submit_timeline(job_id: str, body: dict):
 
 
 def _render_job(job_id: str, input_path: str, output_path: str, keep_ranges: list):
+    tag = job_id[:8]
     try:
-        render_with_ffmpeg(keep_ranges, input_path, output_path, job_id[:8])
+        render_with_ffmpeg(keep_ranges, input_path, output_path, tag)
         if not Path(output_path).exists():
             raise RuntimeError("Output file missing after render")
         actual = get_video_duration(output_path)
@@ -849,7 +923,23 @@ def _render_job(job_id: str, input_path: str, output_path: str, keep_ranges: lis
         in_point  = sorted_kr[0]["start"]  if sorted_kr else 0.0
         out_point = sorted_kr[-1]["end"]   if sorted_kr else actual
         job_update(job_id, kept_duration=actual, in_point=in_point, out_point=out_point)
-        log.info(f"[{job_id[:8]}] Manual render done — actual duration {actual:.2f}s")
+
+        job_data = job_get(job_id)
+        is_vo = job_data and job_data.get("vo_end") is not None
+        if is_vo:
+            original_dur = job_data.get("original_duration") or 0.0
+            vo_end_val   = job_data.get("vo_end")
+            pct = f"{100 * actual / original_dur:.1f}%" if original_dur > 0 else "N/A"
+            log.info(f"[{tag}] ╔══════════════════════════════════════════════╗")
+            log.info(f"[{tag}] ║           VO RENDER COMPLETE                 ║")
+            log.info(f"[{tag}] ╠══════════════════════════════════════════════╣")
+            log.info(f"[{tag}] ║ File          : {Path(input_path).name}")
+            log.info(f"[{tag}] ║ Original      : {original_dur:.3f}s")
+            log.info(f"[{tag}] ║ VO end        : {vo_end_val:.3f}s")
+            log.info(f"[{tag}] ║ Output        : {actual:.3f}s  ({pct} of original)")
+            log.info(f"[{tag}] ╚══════════════════════════════════════════════╝")
+        else:
+            log.info(f"[{tag}] Manual render done — actual duration {actual:.2f}s")
         set_status(job_id, "done", "")
     except Exception as e:
         log.exception(f"[{job_id[:8]}] Manual render failed")
