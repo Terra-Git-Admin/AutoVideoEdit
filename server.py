@@ -307,9 +307,8 @@ async def upload_videos(
     files: list[UploadFile] = File(...),
     sequences: list[int] = Form(...),
     job_ids: list[str] = Form(...),
-    intended_dialogues: list[str] = Form(None),
-    shot_summaries: list[str] = Form(None),
-    rules: str = Form(""),
+    intended_dialogues: str = Form(None),  # JSON: {"job_id": "dialogue text"}
+    shot_summaries: str = Form(None),       # JSON: {"job_id": "shot summary"}
     mode: str = Form("auto"),
     session_id: str = Form(...),  # caller generates one UUID per episode; same for all batches
     has_more: bool = Form(True),  # False on the last batch — tells backend all jobs are now known
@@ -326,11 +325,27 @@ async def upload_videos(
     if len(set(job_ids)) != len(job_ids):
         raise HTTPException(400, "Duplicate job IDs")
 
-    n = len(files)
-    dialogues = list(intended_dialogues) if intended_dialogues else [""] * n
-    summaries = list(shot_summaries) if shot_summaries else [""] * n
-    if len(dialogues) != n or len(summaries) != n:
-        raise HTTPException(400, "intended_dialogues / shot_summaries count must match file count when provided")
+    # ── Parse dialogue map ────────────────────────────────────────────────────
+    dialogue_map: dict[str, str] = {}
+    if intended_dialogues:
+        try:
+            parsed = json.loads(intended_dialogues)
+            if not isinstance(parsed, dict):
+                raise ValueError("intended_dialogues must be a JSON object")
+            dialogue_map = {k: str(v) for k, v in parsed.items()}
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid intended_dialogues: {e}")
+
+    # ── Parse summary map ─────────────────────────────────────────────────────
+    summary_map: dict[str, str] = {}
+    if shot_summaries:
+        try:
+            parsed = json.loads(shot_summaries)
+            if not isinstance(parsed, dict):
+                raise ValueError("shot_summaries must be a JSON object")
+            summary_map = {k: str(v) for k, v in parsed.items()}
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid shot_summaries: {e}")
 
     if _redis is None:
         raise HTTPException(503, "Redis unavailable — cannot process uploads")
@@ -363,9 +378,11 @@ async def upload_videos(
     for jid, j in existing.items():
         log.info(f"║   [{jid[:8]}] status={j['status']:<20} name={j.get('original_name', '?')}")
     log.info(f"╚══════════════════════════════════════════════════════════════╝")
-    log.info(f"=== NEW UPLOAD BATCH === {len(files)} file(s), mode={mode}, rules={rules.strip()[:100] or '(default)'}")
+    log.info(f"=== NEW UPLOAD BATCH === {len(files)} file(s), mode={mode}")
 
-    for file, seq, job_id, intended_dialogue, summary in zip(files, sequences, job_ids, dialogues, summaries):
+    for file, seq, job_id in zip(files, sequences, job_ids):
+        intended_dialogue = dialogue_map.get(job_id, "")
+        summary = summary_map.get(job_id, "")
         safe_filename = Path(file.filename).name if file.filename else "video.mp4"
         upload_path = UPLOAD_DIR / f"{job_id}_{safe_filename}"
         output_path = OUTPUT_DIR / f"{job_id}_{safe_filename}"
@@ -403,7 +420,7 @@ async def upload_videos(
         })
         scheduler.submit(
             session_id,
-            (job_id, str(upload_path), str(output_path), intended_dialogue, summary, rules, mode),
+            (job_id, str(upload_path), str(output_path), intended_dialogue, summary, mode),
         )
         log.info(f"[{job_id[:8]}] Queued via scheduler (session={session_id[:8]})")
 
@@ -439,7 +456,6 @@ def _whisper_stage(
     output_path: str,
     intended_dialogue: str,
     shot_summary: str,
-    rules: str,
     mode: str = "auto",
 ):
     """Stage 1: runs inside _whisper_executor. Transcribes, then chains to _render_stage."""
@@ -448,7 +464,6 @@ def _whisper_stage(
     log.info(f"[{tag}] PIPELINE START  file='{Path(input_path).name}'  mode={mode}")
     log.info(f"[{tag}] intended_dialogue : {intended_dialogue.strip()[:200] or '(none)'}")
     log.info(f"[{tag}] shot_summary      : {shot_summary.strip()[:200] or '(none)'}")
-    log.info(f"[{tag}] rules             : {rules.strip()[:200] or '(default)'}")
 
     if not AE_BIN:
         msg = "auto-editor not installed. Run: brew install auto-editor"
@@ -487,6 +502,22 @@ def _whisper_stage(
             job_update(job_id, status="error", error=str(e))
         return
 
+    # ── No-dialogue shortcut: skip Whisper, send shot description to Gemini ──
+    has_dialogue = bool(intended_dialogue and intended_dialogue.strip())
+    if not has_dialogue:
+        log.info(f"[{tag}] No dialogue provided — skipping Whisper, routing to Gemini via shot description only")
+        try:
+            duration = get_video_duration(input_path)
+            job_update(job_id, original_duration=duration)
+            _render_executor.submit(
+                _render_stage, job_id, input_path, output_path,
+                None, duration, intended_dialogue, shot_summary, mode,
+            )
+        except Exception as e:
+            log.exception(f"[{tag}] NO-DIALOGUE SHORTCUT FAILED: {e}")
+            job_update(job_id, status="error", error=str(e))
+        return
+
     try:
         log.info(f"[{tag}] STEP 1/3 — Whisper transcription")
         set_status(job_id, "transcribing", "Transcribing audio with Whisper…")
@@ -512,7 +543,7 @@ def _whisper_stage(
         # This frees this Whisper worker to start the next job in the scheduler queue.
         _render_executor.submit(
             _render_stage, job_id, input_path, output_path,
-            transcript, duration, intended_dialogue, shot_summary, rules, mode,
+            transcript, duration, intended_dialogue, shot_summary, mode,
         )
 
     except Exception as e:
@@ -528,7 +559,6 @@ def _render_stage(
     duration: float,
     intended_dialogue: str,
     shot_summary: str,
-    rules: str,
     mode: str = "auto",
 ):
     """Stage 2: runs inside _render_executor. Gemini + ffmpeg, fully parallel across jobs."""
@@ -537,7 +567,7 @@ def _render_stage(
         # ── Step 2: Gemini decides what to keep ───────────────────────────
         log.info(f"[{tag}] STEP 2/3 — Gemini AI editing")
         set_status(job_id, "ai_editing", "Gemini is reviewing dialogue and editing…")
-        keep_ranges = gemini_edit(transcript, duration, intended_dialogue, shot_summary, rules)
+        keep_ranges = gemini_edit(transcript, duration, intended_dialogue, shot_summary)
         if not keep_ranges:
             log.error(f"[{tag}] Gemini returned no keep ranges — nothing to render")
             job_update(job_id, status="error", error="Gemini returned no keep ranges for this video")
@@ -570,7 +600,7 @@ def _render_stage(
         actual_duration = get_video_duration(output_path)
         job_update(job_id, kept_duration=actual_duration)
 
-        full_transcript = " ".join(s["text"] for s in transcript) if transcript else "(no speech)"
+        full_transcript = " ".join(s["text"] for s in transcript) if transcript else "(no speech — description-only path)"
         cut_ranges = keep_to_cut_ranges(keep_ranges, duration)
         total_cut = sum(e - s for s, e in cut_ranges)
 
@@ -582,10 +612,9 @@ def _render_stage(
         log.info(f"[{tag}] ║ Mode        : {mode}")
         log.info(f"[{tag}] ╠── Input ──────────────────────────────────────")
         log.info(f"[{tag}] ║ Duration    : {duration:.2f}s")
-        log.info(f"[{tag}] ║ Segments    : {len(transcript)} Whisper segment(s)")
+        log.info(f"[{tag}] ║ Segments    : {len(transcript) if transcript is not None else 'N/A (no-dialogue)'} Whisper segment(s)")
         log.info(f"[{tag}] ║ Transcript  : {full_transcript[:300]}")
         log.info(f"[{tag}] ║ Intended    : {intended_dialogue.strip()[:200] or '(none)'}")
-        log.info(f"[{tag}] ║ Rules       : {rules.strip()[:200] or '(default)'}")
         log.info(f"[{tag}] ╠── Gemini Decision ────────────────────────────")
         log.info(f"[{tag}] ║ Keep ranges : {len(keep_ranges)} segment(s)")
         for i, r in enumerate(keep_ranges):
@@ -724,46 +753,47 @@ def transcribe(input_path: str) -> list:
 
 
 def gemini_edit(
-    transcript: list,
+    transcript: list | None,
     duration: float,
     intended_dialogue: str,
     shot_summary: str,
-    rules: str,
 ) -> list:
     import google.generativeai as genai
 
-    def fmt_transcript(segments):
-        if not segments:
-            return "  (no speech detected)"
-        lines = []
-        for s in segments:
-            lines.append(f"  [{s['start']:.2f}s–{s['end']:.2f}s] \"{s['text']}\"")
-            for w in s.get("words", []):
-                lines.append(f"    {w['start']:.2f}s–{w['end']:.2f}s  \"{w['word']}\"")
-        return "\n".join(lines)
+    if transcript is None:
+        # ── No-dialogue path: description-only prompt ─────────────────────────
+        user_prompt = f"""## Shot Description
+{shot_summary.strip() if shot_summary.strip() else "(none)"}
 
-    transcript_block = fmt_transcript(transcript)
+## Video duration: {duration:.3f}s
 
-    default_rules = (
-        "- Cut filler words and sounds (uh, um, hmm, okay so, etc.)\n"
-        "- Cut pauses longer than 0.8 seconds\n"
-        "- Cut incoherent speech or AI-generation gibberish\n"
-        "- Keep all meaningful dialogue that matches the intended script"
-    )
+This shot has no spoken dialogue. Based solely on the shot description above, decide which portion(s) of this video are worth keeping. Remove any dead air, unnecessary pauses, or footage that doesn't serve the shot's purpose.
 
-    intended_block = (
-        intended_dialogue.strip()
-        if intended_dialogue.strip()
-        else "(none — use best judgement from transcript)"
-    )
+Output JSON with the time ranges to KEEP."""
+    else:
+        # ── Dialogue path: transcript + intended dialogue + shot context ───────
+        def fmt_transcript(segments):
+            if not segments:
+                return "  (no speech detected)"
+            lines = []
+            for s in segments:
+                lines.append(f"  [{s['start']:.2f}s–{s['end']:.2f}s] \"{s['text']}\"")
+                for w in s.get("words", []):
+                    lines.append(f"    {w['start']:.2f}s–{w['end']:.2f}s  \"{w['word']}\"")
+            return "\n".join(lines)
 
-    user_prompt = f"""## Intended Dialogue  (target script — what SHOULD be in this video)
+        transcript_block = fmt_transcript(transcript)
+
+        intended_block = (
+            intended_dialogue.strip()
+            if intended_dialogue and intended_dialogue.strip()
+            else "(none — use best judgement from transcript)"
+        )
+
+        user_prompt = f"""## Intended Dialogue  (target script — what SHOULD be in this video)
 {intended_block}
 
 Find where this dialogue occurs in the transcript. Keep those segments. Cut everything else — especially gibberish, filler, or words not in the intended dialogue.
-
-## Editing Rules
-{rules.strip() if rules.strip() else default_rules}
 
 ## Shot Context
 {shot_summary.strip() if shot_summary.strip() else "(none)"}
